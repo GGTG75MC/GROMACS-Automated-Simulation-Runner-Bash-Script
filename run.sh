@@ -399,9 +399,9 @@ run_energy() {
     return $?
 }
 
-# ==========================================
+# ====================================================
 #       NUEVO SISTEMA DE PARSING MDP CON NUMERACIÓN
-# ==========================================
+# ===================================================
 
 # Función para parsear nombres de archivos MDP con numeración
 parse_mdp_filename() {
