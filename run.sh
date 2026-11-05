@@ -44,6 +44,11 @@ init_gro="$init_gro_file"
 SIMULATION_START_TIME=""
 LOG_FILE=""
 
+# Contadores globales (los usan log_message y el resumen final)
+warning_count=0     # se incrementa automáticamente en cada log_message "WARNING"
+error_count=0
+processed_count=0
+
 # Función para mostrar banner de inicio de simulación general
 show_simulation_start_banner() {
     SIMULATION_START_TIME=$(date +%s)
@@ -267,6 +272,7 @@ log_message() {
             fi
             ;;
         "WARNING")
+            warning_count=$((warning_count + 1))
             if [ -n "$folder" ]; then
                 echo "[$timestamp] [⚠ ] Carpeta $folder: ADVERTENCIA - $message" >> "$LOG_FILE"
                 echo "[$timestamp] [⚠ ] Carpeta $folder: ADVERTENCIA - $message"
@@ -301,8 +307,10 @@ log_summary() {
     } >> "$LOG_FILE"
 
     # Mostrar banner de finalización
-    if [ "$errors" -eq 0 ]; then
+    if [ "$errors" -eq 0 ] && [ "$warnings" -eq 0 ]; then
         show_simulation_end_banner "✓ Éxito"
+    elif [ "$errors" -eq 0 ]; then
+        show_simulation_end_banner "✓ Éxito (advertencias: $warnings)"
     else
         show_simulation_end_banner "✗ Con errores ($errors)"
     fi
@@ -393,6 +401,7 @@ run_mdrun() {
 # ==========================================
 TOTAL_SIMULATIONS=0   # se calcula antes del bucle principal
 attempted_count=0     # simulaciones ya procesadas (completadas, saltadas o fallidas)
+CURRENT_SIM=0         # posición (1..TOTAL) de la simulación en curso
 
 BAR_LAST_LEN=0    # largo visible de la última línea de barra dibujada (0 = no hay)
 BAR_LAST_COLS=0   # ancho de la consola cuando se dibujó
@@ -449,14 +458,34 @@ render_bar() {
     draw_line "${barra_llena}${barra_vacia}${sufijo}" "$(( 2 + ancho + ${#sufijo} ))" "$cols"
 }
 
-# Línea global (solo texto): % de simulaciones completadas y número de la actual, ej: "16%  Sim 2/6"
+# Etiqueta de posición en la cola, para añadir a la barra de pasos: "  · Sim 2/6"
+queue_tag() {
+    (( TOTAL_SIMULATIONS > 0 && CURRENT_SIM > 0 )) || return 0
+    printf ' · Sim %d/%d' "$CURRENT_SIM" "$TOTAL_SIMULATIONS"
+}
+
+# Línea de cola al INICIAR una simulación (solo en terminal). Deja claro que el
+# porcentaje cuenta simulaciones ya terminadas, sin incluir la que arranca:
+#   "Sim 2/6 en curso · 1/6 procesadas (16%)"
 render_global_bar() {
     [ -t 1 ] || return 0
     (( TOTAL_SIMULATIONS > 0 )) || return 0
-    local actual=$(( attempted_count + 1 ))
-    (( actual > TOTAL_SIMULATIONS )) && actual=$TOTAL_SIMULATIONS
     local pct=$(( 100 * attempted_count / TOTAL_SIMULATIONS ))
-    printf "%d%%  Sim %d/%d\n" "$pct" "$actual" "$TOTAL_SIMULATIONS"
+    printf "Sim %d/%d en curso · %d/%d procesadas (%d%%)\n" \
+        "$CURRENT_SIM" "$TOTAL_SIMULATIONS" "$attempted_count" "$TOTAL_SIMULATIONS" "$pct"
+}
+
+# Estado de la cola al TERMINAR cada simulación (también va al log):
+#   "Cola: 2/6 procesadas (33%) · ✓ 2  ✗ 0"
+# Al procesar la última simulación marca 6/6 (100%) y "cola finalizada".
+report_queue_status() {
+    (( TOTAL_SIMULATIONS > 0 )) || return 0
+    local pct=$(( 100 * attempted_count / TOTAL_SIMULATIONS ))
+    local msg="Cola: $attempted_count/$TOTAL_SIMULATIONS procesadas ($pct%) · ✓ $processed_count  ✗ $error_count"
+    if (( attempted_count >= TOTAL_SIMULATIONS )); then
+        msg="$msg · cola finalizada"
+    fi
+    log_message "PROGRESS" "$msg"
 }
 
 # Barra de pasos de la simulación en curso (sin salto de línea)
@@ -464,10 +493,12 @@ render_global_bar() {
 render_step_bar() {
     local step="$1" total="$2" prefix="${3:-Paso}"
     [ -t 1 ] || return 0
+    local tag
+    tag=$(queue_tag)
     if (( total > 0 )); then
-        render_bar "$step" "$total" "$prefix $step/$total"
+        render_bar "$step" "$total" "$prefix $step/$total$tag"
     else
-        local texto="$prefix $step (nsteps no definido)"
+        local texto="$prefix $step (nsteps no definido)$tag"
         draw_line "$texto" "${#texto}" "$(tput cols 2>/dev/null || echo 80)"
     fi
 }
@@ -583,17 +614,19 @@ run_mdrun_with_progress() {
 
     # Barra final
     step=$(get_current_step_from_log "$start_off" "${deffnm}.log")
+    local tag
+    tag=$(queue_tag)
     if [ $exit_code -eq 0 ]; then
         if (( nsteps > 0 )); then
             case "$integrator" in
                 steep|cg|l-bfgs)
                     # Minimización: puede converger antes de nsteps
-                    render_bar "$nsteps" "$nsteps" "✓ Terminó en paso $step (máx. $nsteps)" ;;
+                    render_bar "$nsteps" "$nsteps" "✓ Terminó en paso $step (máx. $nsteps)$tag" ;;
                 *)
-                    render_bar "$nsteps" "$nsteps" "✓ Paso $nsteps/$nsteps" ;;
+                    render_bar "$nsteps" "$nsteps" "✓ Paso $nsteps/$nsteps$tag" ;;
             esac
         else
-            local texto="✓ Terminó en paso $step"
+            local texto="✓ Terminó en paso $step$tag"
             draw_line "$texto" "${#texto}" "$(tput cols 2>/dev/null || echo 80)"
         fi
     else
@@ -716,28 +749,112 @@ get_mdp_file_path() {
 }
 
 # ==========================================
-#  ⚠ CAMBIO 1: extracción de energías con patrones
-#  Soporta NPT.Berdensent, NPT.Crescale, NPT.Parrinello…
+#  EXTRACCIÓN DE ENERGÍAS (por nombre de término, no por índice fijo)
+#  Los índices de "gmx energy" cambian según el campo de fuerza, el
+#  termostato/barostato y el ensamble, así que se lee la tabla de términos
+#  del .edr y se busca cada término por su nombre.
+#  Soporta NPT.Berendsen, NPT.Crescale, NPT.Parrinello…
 # ==========================================
+ENERGY_TERMS=""   # tabla "indice|nombre" del .edr consultado
+
+# Lee la lista de términos de un .edr (el menú que imprime "gmx energy")
+#   $1 = archivo .edr
+probe_energy_terms() {
+    local edr="$1"
+    ENERGY_TERMS=""
+    [ -f "$edr" ] || return 1
+
+    local tmpdir
+    tmpdir=$(mktemp -d 2>/dev/null) || return 1
+
+    # Se envía solo "0" (terminar selección): gmx imprime el menú y sale.
+    # El .xvg de prueba va a un directorio temporal que se borra después.
+    ENERGY_TERMS=$(printf '0\n' | gmx energy -f "$PWD/$edr" -o "$tmpdir/probe.xvg" 2>&1 | awk '
+        # Líneas del menú: empiezan con un número y siguen con un nombre
+        $1 ~ /^[0-9]+$/ && NF >= 2 && $2 !~ /^[0-9.]+$/ {
+            idx = ""; name = ""
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^[0-9]+$/) {
+                    if (idx != "") print idx "|" name
+                    idx = $i; name = ""
+                } else {
+                    name = (name == "" ? $i : name " " $i)
+                }
+            }
+            if (idx != "") print idx "|" name
+        }')
+    rm -rf "$tmpdir"
+
+    [ -n "$ENERGY_TERMS" ]
+}
+
+# Devuelve el índice del término $1 en ENERGY_TERMS (vacío si no existe).
+# Compara sin distinguir mayúsculas y sin la unidad final: "Pressure (bar)" -> "pressure"
+find_energy_term_index() {
+    local wanted="$1"
+    printf '%s\n' "$ENERGY_TERMS" | awk -F'|' -v w="$wanted" '
+        {
+            n = tolower($2)
+            sub(/[- ]?\([^)]*\)$/, "", n)
+            if (n == tolower(w)) { print $1; exit }
+        }'
+}
+
+# Extrae uno o varios términos a un .xvg
+#   $1 = .edr, $2 = .xvg de salida, $3 = descripción, $4... = nombres de términos
+extract_energy_terms() {
+    local edr="$1" out_file="$2" description="$3"
+    shift 3
+
+    local term idx selection="" found=0 missing=""
+    for term in "$@"; do
+        idx=$(find_energy_term_index "$term")
+        if [ -n "$idx" ]; then
+            selection="${selection}${idx}\\n"
+            found=$((found + 1))
+        else
+            missing="$missing $term"
+        fi
+    done
+
+    if [ -n "$missing" ]; then
+        log_message "WARNING" "Términos no encontrados en $edr:$missing"
+    fi
+    if [ "$found" -eq 0 ]; then
+        log_message "WARNING" "No se genera $out_file (ningún término disponible en $edr)"
+        return 1
+    fi
+
+    run_energy "${selection}0" "$edr" "$out_file" "$description"
+}
+
 extract_energy_files() {
     local simulation_name="$1"
+    local edr="${simulation_name}.edr"
+    local rc=0
+
+    if ! probe_energy_terms "$edr"; then
+        log_message "WARNING" "No se pudo leer la lista de términos de $edr; no se extraen energías"
+        return 1
+    fi
 
     case "$simulation_name" in
         MIN*)
-            run_energy "10\\n0" "${simulation_name}.edr" "potential.xvg" "ENERGY-${simulation_name}"
+            extract_energy_terms "$edr" "potential.xvg" "ENERGY-${simulation_name}" Potential || rc=1
             ;;
         NPT*)
-            run_energy "15\\n17\\n0" "${simulation_name}.edr" "temp-press.xvg" "ENERGY-${simulation_name}"
-            run_energy "22\\n0"      "${simulation_name}.edr" "Volumen.xvg"    "VOLUMEN-${simulation_name}"
+            extract_energy_terms "$edr" "temp-press.xvg" "ENERGY-${simulation_name}" Temperature Pressure || rc=1
+            extract_energy_terms "$edr" "Volumen.xvg"    "VOLUMEN-${simulation_name}" Volume || rc=1
             ;;
         *)
-            run_energy "15\\n17\\n0" "${simulation_name}.edr" "temp-press.xvg" "ENERGY-${simulation_name}"
+            extract_energy_terms "$edr" "temp-press.xvg" "ENERGY-${simulation_name}" Temperature Pressure || rc=1
             ;;
     esac
+    return $rc
 }
 
 # ==========================================
-#  ⚠ CAMBIO 2: verificación de completitud con patrones
+#  VERIFICACIÓN DE COMPLETITUD (con patrones)
 # ==========================================
 is_simulation_complete() {
     local sim_path="$1"
@@ -782,6 +899,11 @@ is_simulation_complete() {
 }
 
 # Función para verificar y continuar simulaciones existentes
+# Códigos de retorno:
+#   0 = simulación lista (ya completa, solo se re-extrajeron energías, o se reanudó con éxito)
+#   1 = no hay nada que reanudar: hay que ejecutarla desde el principio
+#   2 = intentó reanudar y FALLÓ. El bucle principal NO la relanza desde grompp,
+#       para no sobrescribir el .tpr ni el checkpoint.
 check_and_continue_simulation() {
     local simulation_folder="$1"
     local simulation_name="$2"
@@ -800,21 +922,21 @@ check_and_continue_simulation() {
     if [ -d "$sim_path" ]; then
         if [ -f "$sim_path/${simulation_name}.tpr" ]; then
 
-            # ==========================================
-            #  ⚠ CAMBIO 3: salvaguarda
-            #  Si mdrun YA terminó (.gro y .edr existen) pero
-            #  faltan solo los .xvg (caso típico al añadir el
-            #  nuevo patrón NPT* a simulaciones previas), NO
-            #  re-ejecutamos mdrun: solo re-extraemos energías.
-            # ==========================================
+            # Salvaguarda: si mdrun YA terminó (.gro y .edr existen) pero faltan
+            # solo los .xvg, NO se re-ejecuta mdrun: solo se re-extraen energías.
             if [ -f "$sim_path/${simulation_name}.gro" ] && [ -f "$sim_path/${simulation_name}.edr" ]; then
                 log_message "INFO" "mdrun ya completó para $simulation_name; re-extrayendo energías faltantes" "$simulation_folder"
                 if ! cd "$sim_path"; then
                     log_message "ERROR" "No se puede cambiar al directorio: $sim_path" "$simulation_folder"
-                    return 1
+                    return 2
                 fi
                 extract_energy_files "$simulation_name"
+                local extract_rc=$?
                 cd "$current_dir"
+                if [ $extract_rc -ne 0 ]; then
+                    log_message "ERROR" "No se pudieron re-extraer las energías de $simulation_name" "$simulation_folder"
+                    return 2
+                fi
                 return 0
             fi
 
@@ -823,7 +945,7 @@ check_and_continue_simulation() {
 
             if ! cd "$sim_path"; then
                 log_message "ERROR" "No se puede cambiar al directorio: $sim_path" "$simulation_folder"
-                return 1
+                return 2
             fi
 
             # Continuar desde checkpoint si existe
@@ -835,7 +957,7 @@ check_and_continue_simulation() {
                 log_message "WARNING" "No se encontró checkpoint, reiniciando simulación" "$simulation_folder"
             fi
 
-            # Banner de inicio (con barra global) justo antes de mdrun
+            # Banner de inicio (con línea de cola) justo antes de mdrun
             local continue_start_time=$(date +%s)
             show_individual_simulation_start "$simulation_name" "$simulation_folder" "-"
             log_section_separator "REINICIO - $simulation_name - CARPETA $simulation_folder"
@@ -845,21 +967,27 @@ check_and_continue_simulation() {
                 "MDRUN-CONTINUE-${simulation_name}" "../../$(get_mdp_file_path "$mdp_file")"
             local mdrun_exit_code=$?
 
+            local c_elapsed c_time
             if [ $mdrun_exit_code -eq 0 ]; then
                 # Extraer energías si mdrun fue exitoso
                 extract_energy_files "$simulation_name"
                 log_message "SUCCESS" "Simulación $simulation_name completada exitosamente después de reinicio" "$simulation_folder"
 
-                local c_elapsed=$(( $(date +%s) - continue_start_time ))
-                local c_time
+                c_elapsed=$(( $(date +%s) - continue_start_time ))
                 c_time=$(printf "%02d:%02d:%02d" $((c_elapsed / 3600)) $(((c_elapsed % 3600) / 60)) $((c_elapsed % 60)))
                 show_individual_simulation_end "$simulation_name" "$simulation_folder" "-" "✓ Éxito" "$c_time"
-            else
-                log_message "ERROR" "Falló MDRUN al continuar $simulation_name" "$simulation_folder"
+
+                cd "$current_dir"
+                return 0
             fi
 
+            log_message "ERROR" "Falló MDRUN al continuar $simulation_name" "$simulation_folder"
+            c_elapsed=$(( $(date +%s) - continue_start_time ))
+            c_time=$(printf "%02d:%02d:%02d" $((c_elapsed / 3600)) $(((c_elapsed % 3600) / 60)) $((c_elapsed % 60)))
+            show_individual_simulation_end "$simulation_name" "$simulation_folder" "-" "✗ Error" "$c_time"
+
             cd "$current_dir"
-            return $mdrun_exit_code
+            return 2
         fi
     fi
 
@@ -969,11 +1097,6 @@ run_simulation_from_mdp() {
 # Iniciar logging
 show_simulation_start_banner
 
-# Contadores para el resumen
-error_count=0
-warning_count=0
-processed_count=0
-
 # Mostrar información de archivos base detectados
 log_message "INFO" "Usando archivos base:"
 log_message "INFO" "  TOP: $(basename "$top")"
@@ -997,25 +1120,36 @@ log_message "INFO" "Total de simulaciones detectadas: $TOTAL_SIMULATIONS"
 for entry in "${MDP_LIST[@]}"; do
     IFS='|' read -r order_number simulation_folder reference simulation_name mdp_file <<< "$entry"
 
+    CURRENT_SIM=$((attempted_count + 1))
+
     # Registrar progreso
-    log_message "PROGRESS" "Procesando [$order_number]: $simulation_folder - $simulation_name (Referencia: $reference)"
+    log_message "PROGRESS" "Procesando [$order_number] ($CURRENT_SIM/$TOTAL_SIMULATIONS): $simulation_folder - $simulation_name (Referencia: $reference)"
 
-    # Verificar si ya existe y está completa
-    if check_and_continue_simulation "$simulation_folder" "$simulation_name" "$mdp_file"; then
-        ((processed_count++))
-        ((attempted_count++))
-        continue
-    fi
+    # Verificar si ya existe (completa o reanudable)
+    check_and_continue_simulation "$simulation_folder" "$simulation_name" "$mdp_file"
+    check_rc=$?
 
-    # Ejecutar nueva simulación
-    if run_simulation_from_mdp "$order_number" "$simulation_folder" "$reference" "$simulation_name" "$mdp_file"; then
-        log_message "SUCCESS" "Simulación $simulation_name completada exitosamente" "$simulation_folder"
-        ((processed_count++))
-    else
-        log_message "ERROR" "Falló la simulación $simulation_name" "$simulation_folder"
-        ((error_count++))
-    fi
-    ((attempted_count++))
+    case $check_rc in
+        0)  # Ya completa, o reanudada con éxito
+            processed_count=$((processed_count + 1))
+            ;;
+        2)  # La reanudación falló: no se relanza desde cero para conservar .tpr y .cpt
+            log_message "ERROR" "No se pudo reanudar/completar $simulation_name; no se relanza desde cero para no sobrescribir .tpr/.cpt. Revisa el log; para empezar de cero borra la carpeta $simulation_folder/$simulation_name" "$simulation_folder"
+            error_count=$((error_count + 1))
+            ;;
+        *)  # No existía: ejecutar nueva simulación
+            if run_simulation_from_mdp "$order_number" "$simulation_folder" "$reference" "$simulation_name" "$mdp_file"; then
+                log_message "SUCCESS" "Simulación $simulation_name completada exitosamente" "$simulation_folder"
+                processed_count=$((processed_count + 1))
+            else
+                log_message "ERROR" "Falló la simulación $simulation_name" "$simulation_folder"
+                error_count=$((error_count + 1))
+            fi
+            ;;
+    esac
+
+    attempted_count=$((attempted_count + 1))
+    report_queue_status
 done
 
 # Registrar resumen final
