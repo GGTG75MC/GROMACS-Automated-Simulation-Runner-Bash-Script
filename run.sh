@@ -19,7 +19,7 @@ if [ -z "$top_file" ]; then
     exit 1
 fi
 
-# Buscar archivo .gro en la carpeta Base  
+# Buscar archivo .gro en la carpeta Base
 init_gro_file=$(find "$base_dir" -maxdepth 1 -name "*.gro" -type f | head -n1)
 if [ -z "$init_gro_file" ]; then
     echo "ERROR: No se encontró archivo .gro en la carpeta '$base_dir'" >&2
@@ -49,10 +49,10 @@ show_simulation_start_banner() {
     SIMULATION_START_TIME=$(date +%s)
     local current_date=$(date '+%Y-%m-%d %H:%M:%S')
     local system_name="GROMACS MD Simulation"
-    
+
     # Crear nombre del archivo de log
     LOG_FILE="simulation_log_$(date +%Y%m%d_%H%M%S).log"
-    
+
     # Banner para consola
     echo ""
     echo "╔════════════════════════════════════════════╗"
@@ -65,7 +65,7 @@ show_simulation_start_banner() {
     echo "  GRO: $(basename "$init_gro")"
     echo "╚════════════════════════════════════════════╝"
     echo ""
-    
+
     # Escribir al archivo de log
     {
         echo "╔════════════════════════════════════════════╗"
@@ -89,7 +89,7 @@ show_simulation_end_banner() {
     local seconds=$((execution_time % 60))
     local formatted_time=$(printf "%02d:%02d:%02d" $hours $minutes $seconds)
     local status="${1:-Completado}"  # Estado por defecto
-    
+
     # Banner para consola
     echo ""
     echo "╔════════════════════════════════════════════╗"
@@ -100,7 +100,7 @@ show_simulation_end_banner() {
     echo "  Tiempo ejecución: $formatted_time                "
     echo "╚════════════════════════════════════════════╝"
     echo ""
-    
+
     # Escribir al archivo de log
     {
         echo ""
@@ -121,7 +121,7 @@ show_individual_simulation_start() {
     local folder="$2"        # Carpeta actual
     local step="$3"          # Paso de la simulación
     local current_date=$(date '+%Y-%m-%d %H:%M:%S')
-    
+
     # Mapear códigos a nombres completos
     case $sim_type in
         "MIN") sim_name="MINIMIZACIÓN" ;;
@@ -130,7 +130,7 @@ show_individual_simulation_start() {
         "NVT") sim_name="PRODUCCIÓN NVT" ;;
         *) sim_name="$sim_type" ;;
     esac
-    
+
     # Banner para consola
     echo ""
     echo "╔════════════════════════════════════════════╗"
@@ -140,8 +140,10 @@ show_individual_simulation_start() {
     echo "  Carpeta: $folder                          "
     echo "  Simulación: $sim_type                            "
     echo "╚════════════════════════════════════════════╝"
-    echo ""
-    
+    # Barra global (justo debajo del mensaje de inicio); la barra de pasos
+    # se dibuja en la línea siguiente cuando arranca mdrun
+    render_global_bar
+
     # Escribir al archivo de log
     {
         echo ""
@@ -164,7 +166,7 @@ show_individual_simulation_end() {
     local status="$4"        # Éxito/Error
     local execution_time="$5" # Tiempo de ejecución (opcional)
     local current_date=$(date '+%Y-%m-%d %H:%M:%S')
-    
+
     # Mapear códigos a nombres completos
     case $sim_type in
         "MIN") sim_name="MINIMIZACIÓN" ;;
@@ -173,12 +175,12 @@ show_individual_simulation_end() {
         "NVT") sim_name="PRODUCCIÓN NVT" ;;
         *) sim_name="$sim_type" ;;
     esac
-    
+
     # Si no se proporciona tiempo, usar valor por defecto
     if [ -z "$execution_time" ]; then
         execution_time="--:--:--"
     fi
-    
+
     # Banner para consola
     echo ""
     echo "╔════════════════════════════════════════════╗"
@@ -190,7 +192,7 @@ show_individual_simulation_end() {
     echo "  Tiempo: $execution_time                    "
     echo "╚════════════════════════════════════════════╝"
     echo ""
-    
+
     # Escribir al archivo de log
     {
         echo ""
@@ -210,7 +212,7 @@ show_individual_simulation_end() {
 log_section_separator() {
     local section_name="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
+
     {
         echo ""
         echo "════════════════════════════════════════════════════════════════"
@@ -226,15 +228,15 @@ log_message() {
     local log_type="$1"    # Tipo de mensaje: INFO, SUCCESS, ERROR, WARNING, PROGRESS
     local message="$2"     # Mensaje a registrar
     local folder="$3"      # Carpeta actual (opcional)
-    
+
     # Si no se ha inicializado el archivo de log, usar nombre por defecto
     if [ -z "$LOG_FILE" ]; then
         LOG_FILE="simulation_log_$(date +%Y%m%d_%H%M%S).log"
     fi
-    
+
     # Formatear timestamp
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
+
     # Formatear mensaje según el tipo
     case $log_type in
         "INFO")
@@ -286,7 +288,7 @@ log_summary() {
     local errors="$2"
     local warnings="$3"
     local status="$4"
-    
+
     {
         echo ""
         echo "========== RESUMEN FINAL =========="
@@ -297,7 +299,7 @@ log_summary() {
         echo "==================================="
         echo ""
     } >> "$LOG_FILE"
-    
+
     # Mostrar banner de finalización
     if [ "$errors" -eq 0 ]; then
         show_simulation_end_banner "✓ Éxito"
@@ -311,9 +313,9 @@ execute_gromacs_command() {
     local command_description="$1"
     local command_to_run="$2"
     local show_output="${3:-false}"
-    
+
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
+
     # Escribir encabezado del comando en el log
     {
         echo ""
@@ -323,15 +325,15 @@ execute_gromacs_command() {
         echo "DIRECTORIO ACTUAL: $(pwd)"
         echo "────────────────────────────────────────────"
     } >> "$LOG_FILE"
-    
+
     # Mostrar en consola qué comando se está ejecutando
     if [ "$show_output" = "true" ]; then
         echo "[$timestamp] Ejecutando: $command_description"
     fi
-    
+
     # Ejecutar el comando y capturar salida en tiempo real
     local exit_code=0
-    
+
     if [ "$show_output" = "true" ]; then
         # Mostrar en consola Y guardar en log
         eval "$command_to_run" 2>&1 | tee -a "$LOG_FILE"
@@ -341,10 +343,10 @@ execute_gromacs_command() {
         eval "$command_to_run" >> "$LOG_FILE" 2>&1
         exit_code=$?
     fi
-    
+
     # Esperar un momento para que GROMACS termine de escribir logs
     sleep 1
-    
+
     # Escribir resultado del comando
     {
         echo "────────────────────────────────────────────"
@@ -356,20 +358,20 @@ execute_gromacs_command() {
         echo "────────────────────────────────────────────"
         echo ""
     } >> "$LOG_FILE"
-    
+
     return $exit_code
 }
 
 # Función para ejecutar grompp
 run_grompp() {
     local mdp_file="$1"
-    local coord_file="$2" 
+    local coord_file="$2"
     local topology_file="$3"
     local output_file="$4"
     local description="${5:-GROMPP}"
-    
+
     local grompp_cmd="gmx grompp -f \"$mdp_file\" -c \"$coord_file\" -p \"$topology_file\" -o \"$output_file\" -maxwarn 1"
-    
+
     execute_gromacs_command "$description" "$grompp_cmd" false
     return $?
 }
@@ -379,11 +381,242 @@ run_mdrun() {
     local deffnm="$1"
     local additional_params="${2:-}"
     local description="${3:-MDRUN}"
-    
+
     local mdrun_cmd="gmx mdrun -v -pin o -deffnm \"$deffnm\" $additional_params"
-    
+
     execute_gromacs_command "$description" "$mdrun_cmd" true
     return $?
+}
+
+# ==========================================
+#       BARRAS DE PROGRESO
+# ==========================================
+TOTAL_SIMULATIONS=0   # se calcula antes del bucle principal
+attempted_count=0     # simulaciones ya procesadas (completadas, saltadas o fallidas)
+
+BAR_LAST_LEN=0    # largo visible de la última línea de barra dibujada (0 = no hay)
+BAR_LAST_COLS=0   # ancho de la consola cuando se dibujó
+
+# Dibuja la línea de progreso borrando antes la anterior.
+#   $1 = texto, $2 = largo visible del texto, $3 = ancho actual de la consola
+# Si la consola cambió de tamaño desde el último dibujo, la terminal pudo haber
+# partido la barra vieja en varias filas: se sube hasta su primera fila y se
+# borra todo hacia abajo antes de redibujar con el ancho nuevo.
+draw_line() {
+    local text="$1" len="$2" cols="$3"
+    if (( BAR_LAST_LEN > 0 && cols != BAR_LAST_COLS )); then
+        local rows=$(( (BAR_LAST_LEN + cols - 1) / cols ))
+        (( rows > 1 )) && printf '\033[%dA' $(( rows - 1 ))
+    fi
+    printf '\r\033[J%s' "$text"
+    BAR_LAST_LEN=$len
+    BAR_LAST_COLS=$cols
+}
+
+# Dibuja una barra en la línea actual (se repinta con \r)
+#   $1 = valor actual, $2 = total, $3 = texto que va tras el porcentaje
+render_bar() {
+    local current="$1" total="$2" suffix_text="$3"
+
+    # Si stdout no es terminal, no ensuciamos la salida
+    [ -t 1 ] || return 0
+
+    # Ancho actual de la consola (se relee en cada repintado)
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 80)
+
+    (( total <= 0 )) && total=1
+    (( current < 0 )) && current=0
+    (( current > total )) && current=$total
+
+    local pct=$(( 100 * current / total ))
+    local sufijo
+    sufijo=$(printf " %3d%%  %s" "$pct" "$suffix_text")
+
+    # cols - corchetes (2) - sufijo - 1 de margen para evitar el salto de línea
+    local ancho=$(( cols - 2 - ${#sufijo} - 1 ))
+    (( ancho < 5 )) && ancho=5
+
+    local llenos=$(( ancho * current / total ))
+    local vacios=$(( ancho - llenos ))
+
+    local barra_llena barra_vacia
+    printf -v barra_llena '%*s' "$llenos" ''
+    printf -v barra_vacia '%*s' "$vacios" ''
+    barra_llena=${barra_llena// /█}
+    barra_vacia=${barra_vacia// /░}
+
+    draw_line "${barra_llena}${barra_vacia}${sufijo}" "$(( 2 + ancho + ${#sufijo} ))" "$cols"
+}
+
+# Línea global (solo texto): % de simulaciones completadas y número de la actual, ej: "16%  Sim 2/6"
+render_global_bar() {
+    [ -t 1 ] || return 0
+    (( TOTAL_SIMULATIONS > 0 )) || return 0
+    local actual=$(( attempted_count + 1 ))
+    (( actual > TOTAL_SIMULATIONS )) && actual=$TOTAL_SIMULATIONS
+    local pct=$(( 100 * attempted_count / TOTAL_SIMULATIONS ))
+    printf "%d%%  Sim %d/%d\n" "$pct" "$actual" "$TOTAL_SIMULATIONS"
+}
+
+# Barra de pasos de la simulación en curso (sin salto de línea)
+#   $1 = paso actual, $2 = nsteps, $3 = prefijo (opcional)
+render_step_bar() {
+    local step="$1" total="$2" prefix="${3:-Paso}"
+    [ -t 1 ] || return 0
+    if (( total > 0 )); then
+        render_bar "$step" "$total" "$prefix $step/$total"
+    else
+        local texto="$prefix $step (nsteps no definido)"
+        draw_line "$texto" "${#texto}" "$(tput cols 2>/dev/null || echo 80)"
+    fi
+}
+
+# Lee un valor de un .mdp (ignora comentarios, mayúsculas y guiones/guiones bajos)
+#   $1 = archivo .mdp, $2 = clave en minúsculas con guiones (ej: nsteps, integrator)
+get_mdp_value() {
+    awk -v key="$2" '
+        { sub(/;.*/, "") }
+        index($0, "=") {
+            k = substr($0, 1, index($0, "=") - 1)
+            v = substr($0, index($0, "=") + 1)
+            gsub(/[ \t\r]/, "", k); gsub(/[ \t\r]/, "", v)
+            k = tolower(k); gsub(/_/, "-", k)
+            if (k == key) val = v
+        }
+        END { print val }
+    ' "$1" 2>/dev/null
+}
+
+# Paso actual de mdrun. Se usan dos fuentes y se toma el mayor:
+#  (1) la salida de "mdrun -v" que queda en $LOG_FILE (solo desde el byte $1,
+#      donde empezó este mdrun). Con descomposición de dominios la línea trae
+#      un prefijo, por eso "step N" se busca en cualquier parte de la línea:
+#        "step 1200, will finish ..."
+#        "vol 0.80  imb F  2% pme/F 0.9 step 1200, will finish ..."
+#        "Step=   12, Dmax= ..."   (minimización)
+#  (2) la tabla "Step Time" del ${deffnm}.log de GROMACS ($2), cada nstlog pasos
+get_current_step_from_log() {
+    local start_off="$1" mdlog="${2:-}"
+    local size from s1 s2=0
+    size=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
+    from=$(( size - 16384 ))
+    (( from < start_off )) && from=$start_off
+
+    s1=$(tail -c +"$(( from + 1 ))" "$LOG_FILE" 2>/dev/null | tr '\r' '\n' | awk '
+        match($0, /(^|[^A-Za-z0-9])[Ss]tep[= \t]+[0-9]+/) {
+            s = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", s); step = s + 0
+        }
+        /converge/ && match($0, /in [0-9]+ steps/) {
+            s = substr($0, RSTART + 3, RLENGTH - 9); step = s + 0
+        }
+        END { print step + 0 }
+    ')
+
+    if [ -n "$mdlog" ] && [ -f "$mdlog" ]; then
+        s2=$(tail -n 400 "$mdlog" 2>/dev/null | awk '
+            /^[ \t]*Step[ \t]+Time/ { found = 1; next }
+            found && /^[ \t]*[0-9]+[ \t]+[-0-9.eE+]+[ \t]*$/ { step = $1 + 0; found = 0 }
+            END { print step + 0 }
+        ')
+    fi
+    (( s2 > s1 )) && s1=$s2
+    echo "$s1"
+}
+
+# mdrun en segundo plano con barra de pasos en tiempo real
+#   $1 = deffnm, $2 = parámetros extra, $3 = descripción, $4 = ruta al .mdp
+#   (la ruta debe ser válida desde el directorio actual)
+run_mdrun_with_progress() {
+    local deffnm="$1"
+    local additional_params="${2:-}"
+    local description="${3:-MDRUN}"
+    local mdp_file="${4:-}"
+
+    # Sin terminal (salida redirigida): comportamiento original, sin barras
+    if [ ! -t 1 ]; then
+        run_mdrun "$deffnm" "$additional_params" "$description"
+        return $?
+    fi
+
+    local mdrun_cmd="gmx mdrun -v -pin o -deffnm \"$deffnm\" $additional_params"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    # Encabezado en el log (mismo estilo que execute_gromacs_command)
+    {
+        echo ""
+        echo "────────────────────────────────────────────"
+        echo "[$timestamp] EJECUTANDO: $description"
+        echo "COMANDO: $mdrun_cmd"
+        echo "DIRECTORIO ACTUAL: $(pwd)"
+        echo "────────────────────────────────────────────"
+    } >> "$LOG_FILE"
+
+    # TOTAL de pasos e integrador, leídos del .mdp
+    local nsteps=0 integrator=""
+    if [ -n "$mdp_file" ] && [ -f "$mdp_file" ]; then
+        nsteps=$(get_mdp_value "$mdp_file" "nsteps")
+        integrator=$(get_mdp_value "$mdp_file" "integrator")
+    fi
+    [[ "$nsteps" =~ ^[0-9]+$ ]] || nsteps=0
+
+    # mdrun en segundo plano; su salida (-v) va al log
+    local start_off
+    start_off=$(wc -c < "$LOG_FILE")
+    eval "$mdrun_cmd" < /dev/null >> "$LOG_FILE" 2>&1 &
+    local mdrun_pid=$!
+
+    # Repintado de la barra cada segundo. Si se redimensiona la consola
+    # (SIGWINCH), la espera se interrumpe y la barra se borra y redibuja ya.
+    BAR_LAST_LEN=0
+    trap ':' WINCH
+    local step=0
+    while kill -0 "$mdrun_pid" 2>/dev/null; do
+        step=$(get_current_step_from_log "$start_off" "${deffnm}.log")
+        render_step_bar "$step" "$nsteps"
+        sleep 1 &
+        wait $! 2>/dev/null
+    done
+    wait "$mdrun_pid"
+    local exit_code=$?
+
+    # Barra final
+    step=$(get_current_step_from_log "$start_off" "${deffnm}.log")
+    if [ $exit_code -eq 0 ]; then
+        if (( nsteps > 0 )); then
+            case "$integrator" in
+                steep|cg|l-bfgs)
+                    # Minimización: puede converger antes de nsteps
+                    render_bar "$nsteps" "$nsteps" "✓ Terminó en paso $step (máx. $nsteps)" ;;
+                *)
+                    render_bar "$nsteps" "$nsteps" "✓ Paso $nsteps/$nsteps" ;;
+            esac
+        else
+            local texto="✓ Terminó en paso $step"
+            draw_line "$texto" "${#texto}" "$(tput cols 2>/dev/null || echo 80)"
+        fi
+    else
+        render_step_bar "$step" "$nsteps" "✗ Paso"
+    fi
+    echo ""
+    trap - WINCH
+    BAR_LAST_LEN=0
+
+    # Cierre en el log
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    {
+        echo "────────────────────────────────────────────"
+        if [ $exit_code -eq 0 ]; then
+            echo "[$timestamp] ✓ COMPLETADO: $description (Exit code: $exit_code)"
+        else
+            echo "[$timestamp] ✗ ERROR: $description (Exit code: $exit_code)"
+        fi
+        echo "────────────────────────────────────────────"
+        echo ""
+    } >> "$LOG_FILE"
+
+    return $exit_code
 }
 
 # Función para ejecutar energy
@@ -392,46 +625,46 @@ run_energy() {
     local edr_file="$2"
     local output_file="$3"
     local description="${4:-ENERGY}"
-    
+
     local energy_cmd="printf \"$input_selections\" | gmx energy -f \"$edr_file\" -o \"$output_file\""
-    
+
     execute_gromacs_command "$description" "$energy_cmd" false
     return $?
 }
 
-# ====================================================
+# ==========================================
 #       NUEVO SISTEMA DE PARSING MDP CON NUMERACIÓN
-# ===================================================
+# ==========================================
 
 # Función para parsear nombres de archivos MDP con numeración
 parse_mdp_filename() {
     local filename="$1"
     local basename=$(basename "$filename" .mdp)
-    
+
     # Dividir por guiones: formato "numero-carpeta-referencia-simulacion"
     IFS='-' read -ra parts <<< "$basename"
-    
+
     if [ ${#parts[@]} -lt 4 ]; then
         echo "ERROR: Formato de archivo MDP incorrecto: $filename" >&2
         return 1
     fi
-    
+
     # Primera parte es el número de orden
     local order_number="${parts[0]}"
-    
+
     # Segunda parte es la carpeta de simulación
     local simulation_folder="${parts[1]}"
-    
+
     # El resto excepto la última parte es la referencia
     local reference_parts=("${parts[@]:2:${#parts[@]}-3}")
     local reference=$(IFS='-'; echo "${reference_parts[*]}")
-    
+
     # Última parte es el nombre de simulación
     local simulation_name="${parts[-1]}"
-    
+
     # Convertir referencias con guiones bajos a rutas
     reference=$(echo "$reference" | sed 's/_/\//g')
-    
+
     echo "$order_number|$simulation_folder|$reference|$simulation_name"
 }
 
@@ -450,7 +683,7 @@ get_coordinate_file_path() {
     local reference_path="$1"
     local simulation_folder="$2"
     local simulation_name="$3"
-    
+
     if [ "$reference_path" = "Base" ]; then
         # Usar archivos iniciales de la carpeta base - ruta absoluta desde directorio raíz
         echo "$init_gro"
@@ -461,7 +694,6 @@ get_coordinate_file_path() {
             echo "${reference_path}/${reference_path##*/}.gro"
         else
             # Referencia dentro de la misma carpeta (ej: MIN -> 150/MIN/MIN.gro)
-            # Si la referencia no tiene path, asumimos que está en la misma carpeta
             local ref_name="$reference_path"
             if [[ "$reference_path" == */* ]]; then
                 ref_name="${reference_path##*/}"
@@ -474,27 +706,29 @@ get_coordinate_file_path() {
 # Función para obtener la ruta correcta del archivo MDP
 get_mdp_file_path() {
     local mdp_file="$1"
-    
+
     # Si el archivo MDP ya tiene ruta completa, usarla
     if [[ "$mdp_file" == MDPs/* ]]; then
         echo "$mdp_file"
     else
-        # Si no, asumir que está en MDPs/
         echo "MDPs/$mdp_file"
     fi
 }
 
-# Función para extraer archivos de energía según el tipo de simulación
+# ==========================================
+#  ⚠ CAMBIO 1: extracción de energías con patrones
+#  Soporta NPT.Berdensent, NPT.Crescale, NPT.Parrinello…
+# ==========================================
 extract_energy_files() {
     local simulation_name="$1"
-    
+
     case "$simulation_name" in
-        "MIN")
+        MIN*)
             run_energy "10\\n0" "${simulation_name}.edr" "potential.xvg" "ENERGY-${simulation_name}"
             ;;
-        "NPT")
+        NPT*)
             run_energy "15\\n17\\n0" "${simulation_name}.edr" "temp-press.xvg" "ENERGY-${simulation_name}"
-            run_energy "22\\n0" "${simulation_name}.edr" "Volumen.xvg" "VOLUMEN-${simulation_name}"
+            run_energy "22\\n0"      "${simulation_name}.edr" "Volumen.xvg"    "VOLUMEN-${simulation_name}"
             ;;
         *)
             run_energy "15\\n17\\n0" "${simulation_name}.edr" "temp-press.xvg" "ENERGY-${simulation_name}"
@@ -502,34 +736,36 @@ extract_energy_files() {
     esac
 }
 
-# Función para verificar si una simulación está completa
+# ==========================================
+#  ⚠ CAMBIO 2: verificación de completitud con patrones
+# ==========================================
 is_simulation_complete() {
     local sim_path="$1"
     local simulation_name="$2"
-    
+
     # Verificar que existe el directorio
     if [ ! -d "$sim_path" ]; then
         return 1
     fi
-    
+
     # Verificar que existe el archivo .tpr (simulación iniciada)
     if [ ! -f "$sim_path/${simulation_name}.tpr" ]; then
         return 1
     fi
-    
+
     # Verificar que existe el archivo .gro de salida (simulación completada)
     if [ ! -f "$sim_path/${simulation_name}.gro" ]; then
         return 1
     fi
-    
+
     # Verificar que existen los archivos .xvg de energía según el tipo de simulación
     case "$simulation_name" in
-        "MIN")
+        MIN*)
             if [ ! -f "$sim_path/potential.xvg" ]; then
                 return 1
             fi
             ;;
-        "NPT")
+        NPT*)
             if [ ! -f "$sim_path/temp-press.xvg" ] || [ ! -f "$sim_path/Volumen.xvg" ]; then
                 return 1
             fi
@@ -540,7 +776,7 @@ is_simulation_complete() {
             fi
             ;;
     esac
-    
+
     # Si pasó todas las verificaciones, la simulación está completa
     return 0
 }
@@ -550,27 +786,46 @@ check_and_continue_simulation() {
     local simulation_folder="$1"
     local simulation_name="$2"
     local mdp_file="$3"
-    
+
     local current_dir=$(pwd)
     local sim_path="$simulation_folder/$simulation_name"
-    
+
     # Verificar si la simulación está completa
     if is_simulation_complete "$sim_path" "$simulation_name"; then
         log_message "SUCCESS" "Simulación $simulation_name ya completada" "$simulation_folder"
         return 0
     fi
-    
+
     # Si el directorio existe pero la simulación no está completa
     if [ -d "$sim_path" ]; then
         if [ -f "$sim_path/${simulation_name}.tpr" ]; then
+
+            # ==========================================
+            #  ⚠ CAMBIO 3: salvaguarda
+            #  Si mdrun YA terminó (.gro y .edr existen) pero
+            #  faltan solo los .xvg (caso típico al añadir el
+            #  nuevo patrón NPT* a simulaciones previas), NO
+            #  re-ejecutamos mdrun: solo re-extraemos energías.
+            # ==========================================
+            if [ -f "$sim_path/${simulation_name}.gro" ] && [ -f "$sim_path/${simulation_name}.edr" ]; then
+                log_message "INFO" "mdrun ya completó para $simulation_name; re-extrayendo energías faltantes" "$simulation_folder"
+                if ! cd "$sim_path"; then
+                    log_message "ERROR" "No se puede cambiar al directorio: $sim_path" "$simulation_folder"
+                    return 1
+                fi
+                extract_energy_files "$simulation_name"
+                cd "$current_dir"
+                return 0
+            fi
+
             # La simulación ya inició pero no completó
             log_message "INFO" "Reiniciando simulación incompleta: $simulation_name" "$simulation_folder"
-            
+
             if ! cd "$sim_path"; then
                 log_message "ERROR" "No se puede cambiar al directorio: $sim_path" "$simulation_folder"
                 return 1
             fi
-            
+
             # Continuar desde checkpoint si existe
             local mdrun_params=""
             if [ -f "${simulation_name}.cpt" ]; then
@@ -579,24 +834,35 @@ check_and_continue_simulation() {
             else
                 log_message "WARNING" "No se encontró checkpoint, reiniciando simulación" "$simulation_folder"
             fi
-            
-            # Ejecutar mdrun
-            run_mdrun "$simulation_name" "$mdrun_params" "MDRUN-CONTINUE-${simulation_name}"
+
+            # Banner de inicio (con barra global) justo antes de mdrun
+            local continue_start_time=$(date +%s)
+            show_individual_simulation_start "$simulation_name" "$simulation_folder" "-"
+            log_section_separator "REINICIO - $simulation_name - CARPETA $simulation_folder"
+
+            # Ejecutar mdrun (el .mdp se lee desde la raíz: estamos dentro de $sim_path)
+            run_mdrun_with_progress "$simulation_name" "$mdrun_params" \
+                "MDRUN-CONTINUE-${simulation_name}" "../../$(get_mdp_file_path "$mdp_file")"
             local mdrun_exit_code=$?
-            
+
             if [ $mdrun_exit_code -eq 0 ]; then
                 # Extraer energías si mdrun fue exitoso
                 extract_energy_files "$simulation_name"
                 log_message "SUCCESS" "Simulación $simulation_name completada exitosamente después de reinicio" "$simulation_folder"
+
+                local c_elapsed=$(( $(date +%s) - continue_start_time ))
+                local c_time
+                c_time=$(printf "%02d:%02d:%02d" $((c_elapsed / 3600)) $(((c_elapsed % 3600) / 60)) $((c_elapsed % 60)))
+                show_individual_simulation_end "$simulation_name" "$simulation_folder" "-" "✓ Éxito" "$c_time"
             else
                 log_message "ERROR" "Falló MDRUN al continuar $simulation_name" "$simulation_folder"
             fi
-            
+
             cd "$current_dir"
             return $mdrun_exit_code
         fi
     fi
-    
+
     # Si llegamos aquí, necesitamos ejecutar la simulación desde el principio
     return 1
 }
@@ -605,35 +871,35 @@ check_and_continue_simulation() {
 run_simulation_from_mdp() {
     local order_number="$1"
     local simulation_folder="$2"
-    local reference_path="$3" 
+    local reference_path="$3"
     local simulation_name="$4"
     local mdp_file="$5"
-    
+
     # Guardar directorio actual para regresar después
     local current_dir=$(pwd)
-    
+
     # MOSTRAR BANNER DE INICIO
     show_individual_simulation_start "$simulation_name" "$simulation_folder" "$order_number"
-    
+
     # Crear separador de sección en el log
     log_section_separator "SIMULACIÓN $order_number - $simulation_name - CARPETA $simulation_folder"
-    
+
     local sim_start_time=$(date +%s)
-    
+
     # Crear directorio de simulación si no existe
     local sim_dir="$simulation_folder/$simulation_name"
     mkdir -p "$sim_dir"
-    
+
     # Cambiar al directorio de simulación
     if ! cd "$sim_dir"; then
         log_message "ERROR" "No se puede cambiar al directorio: $sim_dir" "$simulation_folder"
         return 1
     fi
-    
+
     # Determinar archivo de coordenadas de entrada - usar rutas absolutas desde directorio raíz
     local input_coord=$(get_coordinate_file_path "$reference_path" "$simulation_folder" "$simulation_name")
     local input_top="$top"  # El top siempre es el mismo
-    
+
     # Verificar que el archivo de coordenadas existe (desde directorio raíz)
     if [ ! -f "../../$input_coord" ]; then
         log_message "ERROR" "No se encuentra archivo de coordenadas: $input_coord" "$simulation_folder"
@@ -644,24 +910,24 @@ run_simulation_from_mdp() {
         cd "$current_dir"
         return 1
     fi
-    
+
     # Verificar que el archivo de topología existe
     if [ ! -f "../../$input_top" ]; then
         log_message "ERROR" "No se encuentra archivo de topología: $input_top" "$simulation_folder"
         cd "$current_dir"
         return 1
     fi
-    
+
     # Obtener la ruta correcta al archivo MDP
     local mdp_path=$(get_mdp_file_path "$mdp_file")
-    
+
     # Verificar que el archivo MDP existe
     if [ ! -f "../../$mdp_path" ]; then
         log_message "ERROR" "No se encuentra archivo MDP: $mdp_path" "$simulation_folder"
         cd "$current_dir"
         return 1
     fi
-    
+
     # Ejecutar grompp - usar rutas absolutas desde el directorio de simulación
     run_grompp "../../$mdp_path" "../../$input_coord" "../../$input_top" "${simulation_name}.tpr" "GROMPP-${simulation_name}"
     if [ $? -ne 0 ]; then
@@ -669,21 +935,21 @@ run_simulation_from_mdp() {
         cd "$current_dir"
         return 1
     fi
-    
+
     # Ejecutar mdrun
-    run_mdrun "$simulation_name" "" "MDRUN-${simulation_name}"
+    run_mdrun_with_progress "$simulation_name" "" "MDRUN-${simulation_name}" "../../$mdp_path"
     if [ $? -ne 0 ]; then
         log_message "ERROR" "Falló MDRUN para $simulation_name" "$simulation_folder"
         cd "$current_dir"
         return 1
     fi
-    
+
     # Extraer energías según el tipo de simulación
     extract_energy_files "$simulation_name"
-    
+
     # Volver al directorio original
     cd "$current_dir"
-    
+
     # CALCULAR TIEMPO Y MOSTRAR BANNER DE FINAL
     local sim_end_time=$(date +%s)
     local sim_execution_time=$((sim_end_time - sim_start_time))
@@ -691,7 +957,7 @@ run_simulation_from_mdp() {
     local sim_minutes=$(((sim_execution_time % 3600) / 60))
     local sim_seconds=$((sim_execution_time % 60))
     local sim_formatted_time=$(printf "%02d:%02d:%02d" $sim_hours $sim_minutes $sim_seconds)
-    
+
     show_individual_simulation_end "$simulation_name" "$simulation_folder" "$order_number" "✓ Éxito" "$sim_formatted_time"
     return 0
 }
@@ -722,17 +988,25 @@ if [ ! -d "MDPs" ]; then
     exit 1
 fi
 
+# Leer la lista de MDPs UNA sola vez (para conocer el total y no depender de stdin)
+mapfile -t MDP_LIST < <(find_and_sort_mdps "MDPs")
+TOTAL_SIMULATIONS=${#MDP_LIST[@]}
+log_message "INFO" "Total de simulaciones detectadas: $TOTAL_SIMULATIONS"
+
 # Procesar archivos MDP en el orden correcto según numeración
-while IFS='|' read -r order_number simulation_folder reference simulation_name mdp_file; do
+for entry in "${MDP_LIST[@]}"; do
+    IFS='|' read -r order_number simulation_folder reference simulation_name mdp_file <<< "$entry"
+
     # Registrar progreso
     log_message "PROGRESS" "Procesando [$order_number]: $simulation_folder - $simulation_name (Referencia: $reference)"
-    
+
     # Verificar si ya existe y está completa
     if check_and_continue_simulation "$simulation_folder" "$simulation_name" "$mdp_file"; then
         ((processed_count++))
+        ((attempted_count++))
         continue
     fi
-    
+
     # Ejecutar nueva simulación
     if run_simulation_from_mdp "$order_number" "$simulation_folder" "$reference" "$simulation_name" "$mdp_file"; then
         log_message "SUCCESS" "Simulación $simulation_name completada exitosamente" "$simulation_folder"
@@ -741,8 +1015,8 @@ while IFS='|' read -r order_number simulation_folder reference simulation_name m
         log_message "ERROR" "Falló la simulación $simulation_name" "$simulation_folder"
         ((error_count++))
     fi
-    
-done < <(find_and_sort_mdps "MDPs")
+    ((attempted_count++))
+done
 
 # Registrar resumen final
 log_summary "$processed_count" "$error_count" "$warning_count" "Completado"
