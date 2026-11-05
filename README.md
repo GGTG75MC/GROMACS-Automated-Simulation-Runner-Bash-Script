@@ -1,5 +1,9 @@
 # GROMACS Automated Simulation Runner
 
+<p align="center">
+  <img src="banner.png" width="100%" alt="GROMACS Automated Simulation Runner">
+</p>
+
 ## Descripción General
 
 Script de Bash que automatiza la ejecución de una cola de simulaciones de dinámica molecular con GROMACS. El orden, la carpeta de trabajo y las coordenadas de entrada de cada simulación se definen únicamente con el **nombre de los archivos `.mdp`**. Mientras corre, muestra una **barra de progreso en tiempo real** del paso actual de `mdrun`, indica **en qué posición de la cola** va el proceso y, al terminar cada simulación, reporta el **estado global de la cola**.
