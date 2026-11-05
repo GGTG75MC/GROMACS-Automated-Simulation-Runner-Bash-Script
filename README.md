@@ -1,7 +1,7 @@
 # GROMACS Automated Simulation Runner
 
 <p align="center">
-  <img src="banner.png" width="100%" alt="GROMACS Automated Simulation Runner">
+  <img src="assets/GROMACS_Automated_Simulation_Banner.png" width="100%" alt="GROMACS_Automated_Simulation_Banner.png">
 </p>
 
 ## Descripción General
