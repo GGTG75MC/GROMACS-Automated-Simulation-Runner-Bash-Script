@@ -325,7 +325,7 @@ if user_has_flag nov; then
     cli_warn "Con -nov la barra de progreso solo se actualiza con el .log de GROMACS (cada nstlog pasos)."
 fi
 if ! user_has_flag pin; then
-    MDRUN_DEFAULT_STR+="-pin o "
+    MDRUN_DEFAULT_STR+="-pin on "
 fi
 
 # Flags del usuario, escapados para que sobrevivan al "eval" de execute_gromacs_command
