@@ -1,6 +1,363 @@
 #!/bin/bash
 
 # ==========================================
+#       ARGUMENTOS DE LÍNEA DE COMANDOS
+# ==========================================
+# Uso:  ./run.sh [opciones del script] [flags de mdrun ...]
+#
+# Todo lo que NO sea una opción del script (--gmx, --launcher, ...) se pasa
+# tal cual a "gmx mdrun" en TODAS las simulaciones de la cola.
+# El script ya gestiona por su cuenta -s, -deffnm, -cpi y los nombres de salida.
+
+GMX_REQUESTED="${GMX_BIN:-}"   # --gmx o variable de entorno GMX_BIN
+MDRUN_LAUNCHER=""              # --launcher "mpirun -np 4"
+ALLOW_RISKY=false              # --allow-risky
+MDRUN_USER_ARGS=()             # flags de mdrun escritos por el usuario
+
+cli_error() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+cli_warn() {
+    echo "ADVERTENCIA: $*" >&2
+}
+
+show_usage() {
+    cat <<'EOF'
+GROMACS Automated Simulation Runner
+
+USO
+  ./run.sh [opciones del script] [flags de mdrun]
+
+OPCIONES DEL SCRIPT (doble guion)
+  --gmx <nombre|ruta>   Ejecutable de GROMACS a usar (ej: gmx_mpi, /opt/gromacs/bin/gmx).
+                        También se puede fijar con la variable de entorno GMX_BIN.
+                        Si no se indica y hay más de uno en el PATH, se pregunta cuál.
+  --launcher "<cmd>"    Prefijo para lanzar mdrun (ej: "mpirun -np 4"). Solo para builds MPI.
+  --allow-risky         Permite flags que pueden romper el flujo de la cola
+                        (-maxh, -nsteps, -noappend, ...). No recomendado.
+  -h, --help            Muestra esta ayuda.
+  --                    Fin de opciones del script; lo que sigue va a mdrun.
+
+FLAGS DE MDRUN (un guion; se pasan tal cual)
+  Hilos / ranks    -nt  -ntmpi  -ntomp  -ntomp_pme  -npme
+  Afinidad         -pin <auto|on|off>  -pinoffset  -pinstride
+  GPU              -nb <auto|cpu|gpu>  -pme <auto|cpu|gpu>  -pmefft  -bonded  -update
+                   -gpu_id  -gputasks
+  Dominios (DD)    -dd  -ddorder  -dlb <auto|no|yes>  -dds  -rdd  -rcon  -[no]ddcheck
+  Rendimiento      -nstlist  -[no]tunepme  -[no]reprod
+  Salida/control   -v | -nov  -pforce  -cpt <min>  -[no]cpnum  -xvg  -stepout
+  (la lista completa y su descripción está en el README; para la versión
+   que tengas instalada:  gmx mdrun -h)
+
+GESTIONADOS POR EL SCRIPT (rechazados si se pasan)
+  -s  -deffnm  -cpi  -cpo  -o  -x  -c  -e  -g
+
+EJEMPLOS
+  ./run.sh
+  ./run.sh -ntmpi 1 -ntomp 8 -nb gpu -pme gpu -pin on -v
+  ./run.sh --gmx gmx_mpi --launcher "mpirun -np 4" -ntomp 2
+  nohup ./run.sh --gmx gmx -ntmpi 1 -ntomp 8 -nb gpu -pme gpu > salida.txt 2>&1 &
+EOF
+}
+
+# ---- Lectura de argumentos ----
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        --gmx)
+            [ $# -ge 2 ] || cli_error "--gmx requiere un valor (nombre o ruta del ejecutable)"
+            GMX_REQUESTED="$2"
+            shift 2
+            ;;
+        --gmx=*)
+            GMX_REQUESTED="${1#--gmx=}"
+            shift
+            ;;
+        --launcher)
+            [ $# -ge 2 ] || cli_error "--launcher requiere un valor (ej: \"mpirun -np 4\")"
+            MDRUN_LAUNCHER="$2"
+            shift 2
+            ;;
+        --launcher=*)
+            MDRUN_LAUNCHER="${1#--launcher=}"
+            shift
+            ;;
+        --allow-risky)
+            ALLOW_RISKY=true
+            shift
+            ;;
+        --)
+            shift
+            MDRUN_USER_ARGS+=("$@")
+            break
+            ;;
+        --*)
+            cli_error "Opción desconocida del script: $1 (usa --help). Los flags de mdrun llevan un solo guion."
+            ;;
+        *)
+            MDRUN_USER_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# ---- Flags que el script no permite pasar a mdrun ----
+# Gestionados por el script: rutas y nombres de archivos de cada simulación
+MANAGED_FLAGS=(s deffnm cpi cpo o x c e g)
+# Rompen la lógica de cola/reanudación (ver motivo en risky_reason)
+RISKY_FLAGS=(maxh nsteps rerun noappend multidir replex nex reseed)
+
+risky_reason() {
+    case "$1" in
+        maxh)      echo "mdrun termina antes de tiempo con código 0 y el script lo daría por completado (la siguiente etapa usaría un .gro a medias)" ;;
+        nsteps)    echo "sobrescribe el nsteps del .mdp: la barra de progreso y el control de completitud dejan de ser fiables" ;;
+        rerun)     echo "no ejecuta dinámica, solo recalcula energías de una trayectoria" ;;
+        noappend)  echo "separa la salida en archivos .partNNNN y rompe la reanudación y la detección de simulaciones completas" ;;
+        *)         echo "multi-simulación / replica exchange: el flujo en cola no lo soporta" ;;
+    esac
+}
+
+check_user_flags() {
+    local tok name m
+    for tok in "${MDRUN_USER_ARGS[@]}"; do
+        # Un flag empieza con "-" + letra (así "-1" o "0,1" se tratan como valores)
+        [[ "$tok" =~ ^-[A-Za-z] ]] || continue
+        name="${tok#-}"
+
+        for m in "${MANAGED_FLAGS[@]}"; do
+            if [ "$name" = "$m" ]; then
+                cli_error "El flag '-$m' lo gestiona el script (archivos de cada simulación) y no puede pasarse a mdrun."
+            fi
+        done
+
+        for m in "${RISKY_FLAGS[@]}"; do
+            if [ "$name" = "$m" ]; then
+                if $ALLOW_RISKY; then
+                    cli_warn "-$m permitido con --allow-risky: $(risky_reason "$m")."
+                else
+                    cli_error "El flag '-$m' no está permitido: $(risky_reason "$m"). Si sabes lo que haces, usa --allow-risky."
+                fi
+            fi
+        done
+    done
+}
+
+check_user_flags
+
+if [ -n "$MDRUN_LAUNCHER" ]; then
+    command -v "${MDRUN_LAUNCHER%% *}" >/dev/null 2>&1 \
+        || cli_error "El launcher '${MDRUN_LAUNCHER%% *}' no existe en el PATH"
+fi
+
+# ==========================================
+#       DETECCIÓN Y SELECCIÓN DE GROMACS
+# ==========================================
+GMX_EXE=""        # ejecutable elegido (ruta absoluta)
+GMX_INFO=""       # descripción legible de la versión
+GMX_MPI_KIND=""   # "MPI" (MPI real), "thread_mpi" o similar
+
+# Extrae el valor de una clave de la salida de "gmx --version"
+#   $1 = clave (ej: "GROMACS version"), $2 = texto
+gmx_field() {
+    awk -v k="$1" '
+        index($0, k ":") == 1 {
+            v = substr($0, length(k) + 2)
+            gsub(/^[ \t]+|[ \t]+$/, "", v)
+            print v; exit
+        }' <<< "$2"
+}
+
+# Comprueba que $1 es realmente GROMACS y devuelve "version|mpi|gpu|precision".
+# Falla (código 1) si no lo es: así se descartan archivos "gmx*" ajenos.
+gmx_describe() {
+    local exe="$1" out ver mpi gpu prec
+    out=$(timeout 20 "$exe" --version 2>&1 < /dev/null) || return 1
+    ver=$(gmx_field "GROMACS version" "$out")
+    [ -n "$ver" ] || return 1
+    mpi=$(gmx_field "MPI library" "$out");   : "${mpi:=?}"
+    gpu=$(gmx_field "GPU support" "$out");   : "${gpu:=?}"
+    prec=$(gmx_field "Precision" "$out");    : "${prec:=?}"
+    printf '%s|%s|%s|%s' "$ver" "$mpi" "$gpu" "$prec"
+}
+
+# Hace absoluta una ruta (el script hace "cd" a subcarpetas)
+gmx_abs_path() {
+    case "$1" in
+        /*) printf '%s' "$1" ;;
+        *)  printf '%s/%s' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")" ;;
+    esac
+}
+
+# Fija GMX_EXE / GMX_INFO / GMX_MPI_KIND a partir de una ruta y su descripción
+gmx_set_selected() {
+    local exe="$1" desc="$2" ver mpi gpu prec
+    IFS='|' read -r ver mpi gpu prec <<< "$desc"
+    GMX_EXE="$exe"
+    GMX_MPI_KIND="$mpi"
+    GMX_INFO="GROMACS $ver · MPI: $mpi · GPU: $gpu · precisión: $prec"
+}
+
+select_gromacs() {
+    local desc exe
+
+    # 1) Elección explícita: --gmx o GMX_BIN
+    if [ -n "$GMX_REQUESTED" ]; then
+        exe=$(command -v -- "$GMX_REQUESTED" 2>/dev/null) \
+            || cli_error "No se encuentra el ejecutable de GROMACS '$GMX_REQUESTED'"
+        exe=$(gmx_abs_path "$exe")
+        desc=$(gmx_describe "$exe") \
+            || cli_error "'$exe' no responde como GROMACS (falló '--version')"
+        gmx_set_selected "$exe" "$desc"
+        return 0
+    fi
+
+    # 2) Búsqueda automática: todo ejecutable "gmx*" del PATH que sea GROMACS
+    local -a cand_paths=() cand_descs=()
+    local -A seen=()
+    local -a path_dirs=()
+    local dir f real
+    IFS=: read -ra path_dirs <<< "$PATH"
+    for dir in "${path_dirs[@]}"; do
+        [ -n "$dir" ] && [ -d "$dir" ] || continue
+        for f in "$dir"/gmx*; do
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            real=$(readlink -f "$f" 2>/dev/null || echo "$f")
+            [ -n "${seen[$real]:-}" ] && continue       # mismo binario por otro enlace (/bin -> /usr/bin)
+            desc=$(gmx_describe "$f") || continue
+            seen[$real]=1
+            cand_paths+=("$f")
+            cand_descs+=("$desc")
+        done
+    done
+
+    local n=${#cand_paths[@]}
+    if [ "$n" -eq 0 ]; then
+        cli_error "No se encontró ningún GROMACS (gmx*) en el PATH.
+       Carga tu instalación (ej: source /usr/local/gromacs/bin/GMXRC) o usa --gmx /ruta/a/gmx"
+    fi
+
+    if [ "$n" -eq 1 ]; then
+        gmx_set_selected "${cand_paths[0]}" "${cand_descs[0]}"
+        return 0
+    fi
+
+    # 3) Hay varios: preguntar (solo posible con terminal)
+    local i ver mpi gpu prec
+    echo "¿Qué GROMACS quieres usar? (se detectaron $n)"
+    echo ""
+    for i in "${!cand_paths[@]}"; do
+        IFS='|' read -r ver mpi gpu prec <<< "${cand_descs[$i]}"
+        printf '  (%d) %s\n' "$((i + 1))" "$(basename "${cand_paths[$i]}")"
+        printf '      %s · MPI: %s · GPU: %s · %s\n' "$ver" "$mpi" "$gpu" "$prec"
+        printf '      %s\n' "${cand_paths[$i]}"
+    done
+    echo ""
+
+    if [ ! -t 0 ]; then
+        cli_error "Hay varios GROMACS y no hay terminal para preguntar. Indica uno con --gmx <nombre|ruta> (o GMX_BIN)."
+    fi
+
+    local choice
+    while true; do
+        read -r -p "Selecciona [1-$n]: " choice || cli_error "Selección cancelada"
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ]; then
+            gmx_set_selected "${cand_paths[$((choice - 1))]}" "${cand_descs[$((choice - 1))]}"
+            echo ""
+            return 0
+        fi
+        echo "Opción no válida."
+    done
+}
+
+select_gromacs
+echo "GROMACS seleccionado: $GMX_EXE"
+echo "  $GMX_INFO"
+echo ""
+
+# ---- Validación de los flags contra ESTA versión de GROMACS ----
+# Se lanza "mdrun <flags> -s <inexistente>" en un directorio temporal: el
+# parser de GROMACS rechaza flags desconocidos o con valores inválidos antes
+# de buscar el .tpr, así se detectan los errores de inmediato y no horas después.
+# (Usar el propio GROMACS también cubre flags ocultos y los que cambian entre versiones.)
+validate_mdrun_flags() {
+    [ "${#MDRUN_USER_ARGS[@]}" -gt 0 ] || return 0
+    local tmp out bad
+    tmp=$(mktemp -d)
+    out=$(cd "$tmp" && timeout 60 "$GMX_EXE" mdrun "${MDRUN_USER_ARGS[@]}" -s "$tmp/__probe__.tpr" 2>&1 < /dev/null)
+    rm -rf "$tmp"
+
+    bad=$(awk '
+        /Unknown command-line option/ { print "  flag desconocido: " $NF; next }
+        /^  In command-line option /   { opt = $NF; next }
+        /Invalid value:/ && opt != ""  { print "  valor inválido para " opt ": " $NF }
+    ' <<< "$out")
+
+    if [ -n "$bad" ]; then
+        echo "ERROR: GROMACS rechaza los flags de mdrun indicados:" >&2
+        echo "$bad" >&2
+        echo "Flags válidos para esta versión: $GMX_EXE mdrun -h" >&2
+        exit 1
+    fi
+}
+
+validate_mdrun_flags
+
+# ---- Construcción de la línea de mdrun ----
+user_has_flag() {
+    local a
+    for a in "${MDRUN_USER_ARGS[@]}"; do
+        [ "$a" = "-$1" ] && return 0
+    done
+    return 1
+}
+
+# Valores por defecto del script (los del script original), salvo que el usuario los fije
+MDRUN_DEFAULT_STR=""
+if ! user_has_flag v && ! user_has_flag nov; then
+    MDRUN_DEFAULT_STR+="-v "
+fi
+if user_has_flag nov; then
+    cli_warn "Con -nov la barra de progreso solo se actualiza con el .log de GROMACS (cada nstlog pasos)."
+fi
+if ! user_has_flag pin; then
+    MDRUN_DEFAULT_STR+="-pin o "
+fi
+
+# Flags del usuario, escapados para que sobrevivan al "eval" de execute_gromacs_command
+MDRUN_USER_STR=""
+if [ "${#MDRUN_USER_ARGS[@]}" -gt 0 ]; then
+    MDRUN_USER_STR=$(printf '%q ' "${MDRUN_USER_ARGS[@]}")
+    MDRUN_USER_STR="${MDRUN_USER_STR% }"
+fi
+
+# Avisos según el tipo de build
+if [ "$GMX_MPI_KIND" = "MPI" ]; then
+    if user_has_flag ntmpi || user_has_flag nt; then
+        cli_warn "Este GROMACS usa MPI real: -ntmpi / -nt no se aplican; usa --launcher \"mpirun -np N\" para fijar los ranks."
+    fi
+    if [ -z "$MDRUN_LAUNCHER" ]; then
+        echo "Nota: build MPI sin --launcher; mdrun se ejecutará con 1 rank. Para más: --launcher \"mpirun -np N\"" >&2
+    fi
+elif [ -n "$MDRUN_LAUNCHER" ]; then
+    cli_warn "--launcher indicado, pero este GROMACS no es MPI real; el launcher se usará de todos modos."
+fi
+
+# Línea de comando de mdrun: $1 = deffnm, $2 = parámetros internos (ej: -cpi x.cpt)
+build_mdrun_cmd() {
+    local deffnm="$1" extra="${2:-}" cmd=""
+    [ -n "$MDRUN_LAUNCHER" ] && cmd="$MDRUN_LAUNCHER "
+    cmd+="\"$GMX_EXE\" mdrun ${MDRUN_DEFAULT_STR}-deffnm \"$deffnm\""
+    [ -n "$extra" ] && cmd+=" $extra"
+    [ -n "$MDRUN_USER_STR" ] && cmd+=" $MDRUN_USER_STR"
+    printf '%s' "$cmd"
+}
+
+# ==========================================
 #       DETECCIÓN AUTOMÁTICA DE ARCHIVOS
 # ==========================================
 
@@ -378,7 +735,7 @@ run_grompp() {
     local output_file="$4"
     local description="${5:-GROMPP}"
 
-    local grompp_cmd="gmx grompp -f \"$mdp_file\" -c \"$coord_file\" -p \"$topology_file\" -o \"$output_file\" -maxwarn 1"
+    local grompp_cmd="\"$GMX_EXE\" grompp -f \"$mdp_file\" -c \"$coord_file\" -p \"$topology_file\" -o \"$output_file\" -maxwarn 1"
 
     execute_gromacs_command "$description" "$grompp_cmd" false
     return $?
@@ -390,7 +747,8 @@ run_mdrun() {
     local additional_params="${2:-}"
     local description="${3:-MDRUN}"
 
-    local mdrun_cmd="gmx mdrun -v -pin o -deffnm \"$deffnm\" $additional_params"
+    local mdrun_cmd
+    mdrun_cmd=$(build_mdrun_cmd "$deffnm" "$additional_params")
 
     execute_gromacs_command "$description" "$mdrun_cmd" true
     return $?
@@ -570,7 +928,8 @@ run_mdrun_with_progress() {
         return $?
     fi
 
-    local mdrun_cmd="gmx mdrun -v -pin o -deffnm \"$deffnm\" $additional_params"
+    local mdrun_cmd
+    mdrun_cmd=$(build_mdrun_cmd "$deffnm" "$additional_params")
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
@@ -659,7 +1018,7 @@ run_energy() {
     local output_file="$3"
     local description="${4:-ENERGY}"
 
-    local energy_cmd="printf \"$input_selections\" | gmx energy -f \"$edr_file\" -o \"$output_file\""
+    local energy_cmd="printf \"$input_selections\" | \"$GMX_EXE\" energy -f \"$edr_file\" -o \"$output_file\""
 
     execute_gromacs_command "$description" "$energy_cmd" false
     return $?
@@ -769,7 +1128,7 @@ probe_energy_terms() {
 
     # Se envía solo "0" (terminar selección): gmx imprime el menú y sale.
     # El .xvg de prueba va a un directorio temporal que se borra después.
-    ENERGY_TERMS=$(printf '0\n' | gmx energy -f "$PWD/$edr" -o "$tmpdir/probe.xvg" 2>&1 | awk '
+    ENERGY_TERMS=$(printf '0\n' | "$GMX_EXE" energy -f "$PWD/$edr" -o "$tmpdir/probe.xvg" 2>&1 | awk '
         # Líneas del menú: empiezan con un número y siguen con un nombre
         $1 ~ /^[0-9]+$/ && NF >= 2 && $2 !~ /^[0-9.]+$/ {
             idx = ""; name = ""
@@ -1101,6 +1460,9 @@ show_simulation_start_banner
 log_message "INFO" "Usando archivos base:"
 log_message "INFO" "  TOP: $(basename "$top")"
 log_message "INFO" "  GRO: $(basename "$init_gro")"
+log_message "INFO" "GROMACS: $GMX_EXE ($GMX_INFO)"
+[ -n "$MDRUN_LAUNCHER" ] && log_message "INFO" "Launcher mdrun: $MDRUN_LAUNCHER"
+log_message "INFO" "Flags mdrun: ${MDRUN_DEFAULT_STR}${MDRUN_USER_STR:-(sin flags adicionales)}"
 
 # Buscar y procesar todos los archivos MDP
 log_message "INFO" "Buscando archivos MDP en carpeta MDPs"
